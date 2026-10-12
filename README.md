@@ -1,0 +1,1 @@
+# agrolsklep-openai-katalog
