@@ -18,97 +18,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Checkout generator code
+        uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
-      - name: Download and validate CTX Feed
-        env:
-          SOURCE_URL: https://agrolsklep.pl/wp-content/uploads/woo-feed/chatgpt/tsv/openai.tsv
-        shell: bash
-        run: |
-          python - <<'PY'
-          import csv
-          import io
-          import os
-          import re
-          import sys
-          import urllib.request
-          from datetime import datetime, timezone
-          from pathlib import Path
+      - name: Validate normalization rules
+        run: python -m unittest discover -s tests -v
 
-          url = os.environ['SOURCE_URL']
-          print(f'Downloading source feed: {url}', flush=True)
-          request = urllib.request.Request(url, headers={'User-Agent': 'AgrolsklepCatalogPublisher/1.0'})
-          with urllib.request.urlopen(request, timeout=60) as response:
-              if response.status != 200:
-                  sys.exit(f'ERROR: Feed HTTP {response.status}')
-              raw = response.read(50_000_001)
-          if not raw or len(raw) > 50_000_000:
-              sys.exit('ERROR: Empty feed or larger than 50 MB')
-          try:
-              text = raw.decode('utf-8-sig')
-          except UnicodeDecodeError as exc:
-              sys.exit(f'ERROR: Invalid UTF-8: {exc}')
-
-          reader = csv.DictReader(io.StringIO(text, newline=''), delimiter='\t')
-          headers = reader.fieldnames or []
-          required = {'item_id', 'title', 'description', 'url', 'brand',
-                      'seller_name', 'image_url', 'availability', 'price'}
-          if len(headers) != len(set(headers)) or not required.issubset(headers):
-              sys.exit(f'ERROR: Missing or duplicated columns: {headers}')
-
-          Path('public').mkdir(exist_ok=True)
-          source_count, accepted, skipped = 0, 0, []
-          seen_ids = set()
-          allowed_stock = {'in_stock', 'out_of_stock', 'pre_order', 'backorder', 'unknown'}
-          price_pattern = re.compile(r'\d+(?:\.\d{1,2})? PLN')
-          with open('public/openai.csv', 'w', encoding='utf-8', newline='') as handle:
-              writer = csv.DictWriter(handle, fieldnames=headers, lineterminator='\n')
-              writer.writeheader()
-              for line_num, row in enumerate(reader, start=2):
-                  source_count += 1
-                  if None in row or any(value is None for value in row.values()):
-                      sys.exit(f'ERROR: Malformed TSV fields at line {line_num}')
-                  pid = row['item_id'].strip()
-                  if not pid or pid in seen_ids:
-                      sys.exit(f'ERROR: Missing or duplicated product ID at line {line_num}: {pid!r}')
-                  seen_ids.add(pid)
-                  if any(not (row.get(key) or '').strip() for key in required - {'price'}):
-                      sys.exit(f'ERROR: Required field empty at line {line_num} ({pid})')
-                  if not row['url'].startswith('https://') or not row['image_url'].startswith('https://'):
-                      sys.exit(f'ERROR: Product/image URL is not HTTPS at line {line_num} ({pid})')
-                  if row['availability'] not in allowed_stock:
-                      sys.exit(f'ERROR: Invalid availability at line {line_num} ({pid})')
-                  price = row['price'].strip()
-                  if not price:
-                      skipped.append(pid)
-                      continue
-                  if not price_pattern.fullmatch(price) or float(price.split()[0]) <= 0:
-                      sys.exit(f'ERROR: Invalid price at line {line_num} ({pid}): {price[:50]!r}')
-                  writer.writerow(row)
-                  accepted += 1
-
-          if source_count < 1900 or accepted < 1900:
-              sys.exit(f'ERROR: Unexpectedly small catalog ({source_count} source, {accepted} valid)')
-          if len(skipped) > max(10, int(source_count * 0.01)):
-              sys.exit(f'ERROR: Too many products without prices ({len(skipped)})')
-          print(f'OK: source={source_count}, published={accepted}, skipped_no_price={len(skipped)}', flush=True)
-          if skipped:
-              print('Skipped item IDs:', ', '.join(skipped), flush=True)
-
-          # GitHub Pages entry point. The feed itself is public and served as /openai.csv.
-          Path('public/index.html').write_text(
-              '<!doctype html><html lang="pl"><meta charset="utf-8">'
-              '<title>AGROLSKLEP — product feed</title>'
-              '<p>AGROLSKLEP — product catalog for advertising.</p>'
-              '<p><a href="openai.csv">Current OpenAI product feed (CSV)</a></p>'
-              '</html>\n', encoding='utf-8'
-          )
-          Path('public/.nojekyll').touch()
-          print('Artifact ready at public/openai.csv — ' + datetime.now(timezone.utc).isoformat(), flush=True)
-          PY
+      - name: Download, normalize and validate CTX Feed
+        run: python scripts/build_openai_feed.py
 
       - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v4
